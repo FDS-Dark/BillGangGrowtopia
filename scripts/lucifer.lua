@@ -398,9 +398,9 @@ server:post("/delivery", function(request, response)
             end
         end
 
-        local new_locks = count_dropped_locks()
+        local locks = count_dropped_locks_string()
 
-        POST("http://73.247.130.199:3730/update_amount", {world = world.name, amounts = new_locks})
+        POST("http://73.247.130.199:3730/update_amount", {world = world.name, amounts = locks})
         -- print("POSTED NEW LOCK DATA")
         return true
     end
