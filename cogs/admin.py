@@ -24,10 +24,11 @@ class Admin(commands.Cog):
 		self.name = "Admin"
 		self.db = db
 		self.utils = Utils(self.bot)
+		self.handle_orders.start()
 
 	admin = SlashCommandGroup("admin", "Admin commands")
 	manage = SlashCommandGroup("manage", "Management commands")
-	
+
 	async def cog_check(self, ctx):
 		# Implement your cog check logic here
 		return ctx.user.id == 778842686031003721
@@ -41,6 +42,7 @@ class Admin(commands.Cog):
 
 	@tasks.loop(seconds=15)
 	async def handle_orders(self):
+		print("Handling orders...")
 		cursor = await self.db.execute("SELECT * FROM orders WHERE status = %s", ["paid"])
 		results = await cursor.fetchall()
 
@@ -50,34 +52,34 @@ class Admin(commands.Cog):
 		if len(account_details) < 1:
 			await self.utils.send_log("ERROR", f"No valid save accounts found! <@{config['BOT']['owner_id']}>")
 
-		if len(results) >= 0:
+		if len(results) >= 1:
 			for result in results:
-
+				print(f"Handling Order ID {result[1]}, quantity: {result[2]}")
 				world_cursor = await self.db.execute("SELECT * FROM save_worlds")
 				world_results = await world_cursor.fetchall()
 
 				if len(world_results) < 1:
-					await self.utils.send_log("ERROR", f"Failed to fulfill order ID {results[1]} due to lack of save worlds. Please add save worlds with /addsave.")
-					await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", results[1]])
+					await self.utils.send_log("ERROR", f"Failed to fulfill order ID {result[1]} due to lack of save worlds. Please add save worlds with /addsave.")
+					await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", result[1]])
 					return
 
 				world_data = await self.utils.get_world_combination(result[2], world_results)
 
 				if len(world_data) == 0:
-					await self.utils.send_log("ERROR", f"Failed to fulfill order ID {results[1]} due to lack of inventory. Consider running `/manage sync` if you believe this is an error.")
-					await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", results[1]])
+					await self.utils.send_log("ERROR", f"Failed to fulfill order ID {result[1]} due to lack of inventory. Consider running `/manage sync` if you believe this is an error.")
+					await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", result[1]])
 					return
 
 				async with aiohttp.ClientSession() as session:
-					async with session.get(f"https://pg-api.billgang.com/v1/dash/shops/{os.getenv("BILLGANGBOT_STORE_ID")}/orders/{results[1]}", headers = {"Authorization": f"Bearer {os.getenv("BILLGANGBOT_API_KEY")}"}) as response:
+					async with session.get(f"https://pg-api.billgang.com/v1/dash/shops/{os.getenv("BILLGANGBOT_STORE_ID")}/orders/{result[1]}", headers = {"Authorization": f"Bearer {os.getenv("BILLGANGBOT_API_KEY")}"}) as response:
 						if response.status == 200:
 							order_info = await response.json()
 
 							output_world = order_info['data']['metadata']['World Name']
 				
 				if not output_world:
-					await self.utils.send_log("ERROR", f"Failed to fulfill order ID {results[1]} as no world name was. Please fix!")
-					await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", results[1]])
+					await self.utils.send_log("ERROR", f"Failed to fulfill order ID {result[1]} as no world name was. Please fix!")
+					await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", result[1]])
 					return
 				
 				data = {
@@ -90,13 +92,15 @@ class Admin(commands.Cog):
 
 				async with aiohttp.ClientSession() as session:
 					async with session.post(f"http://{os.getenv('BILLGANGBOT_LUCIFER_IP')}:{os.getenv('BILLGANGBOT_LUCIFER_PORT')}/delivery", json=data) as response:
+						print(response.status)
 						if response.status == 200:
 							content = await response.json()
+							await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["delivered", result[1]])
 							await self.utils.send_log('DELIVERY', f"{content['content']}\n\nTime: <t:{content['time']}>")
 							return
 						else:
 							content = await response.json()
-							await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", results[1]])
+							await self.db.execute("UPDATE orders SET status = %s WHERE orderId = %s", ["error", result[1]])
 							await self.utils.send_log('ERROR', f"Error code {response.status} while delivering order {result[1]}\n\n{content['error_code']}\n{content['error']}")
 							return
 
@@ -133,24 +137,9 @@ class Admin(commands.Cog):
 						async with session.post(f"http://{os.getenv('BILLGANGBOT_LUCIFER_IP')}:{os.getenv('BILLGANGBOT_LUCIFER_PORT')}/distribute2", json=data) as response:
 							if response.status == 200:
 								content = await response.json()
-								await message.edit(embed = discord.Embed(title = "Please Wait", description="Updating BillGang product stock..."))
-								
-								world_cursor = await self.db.execute("SELECT * FROM save_worlds")
-								world_data = await world_cursor.fetchall()
+								await message.edit(embed = discord.Embed(title = "Please Wait", description="Updating BillGang product stock...", color = discord.Color.dark_orange()))
 
-								total = {
-									"1796": 0,
-									"7188": 0
-								}
-
-								for world in world_data:
-									amounts = json.loads(world[2])
-
-									for key in amounts.keys():
-										total[key] += amounts[key]
-
-								for key in total.keys():
-									await self.utils.update_billgang_stock(key, total[key], 'set')
+								await self.utils.update_global_stock()
 									
 								await message.edit(embed = discord.Embed(title = "Success", description=content['content']))
 
@@ -171,7 +160,7 @@ class Admin(commands.Cog):
 					return
 
 	@admin.command(name = "send", description = "Send stock to a world!")
-	async def send(self, ctx, world_name: discord.Option(str, description="World Name", default = ""), amount: discord.Option(int, description="Amount of DLs to deliver (must be less than total stock)")):
+	async def send(self, ctx, world_name: discord.Option(str, description="World Name"), amount: discord.Option(int, description="Amount of DLs to deliver (must be less than total stock)")):
 		await ctx.defer(ephemeral=True)
 
 		if world_name == "":
@@ -209,7 +198,7 @@ class Admin(commands.Cog):
 		data = {
 			"authorization": os.getenv("BILLGANGBOT_LUCIFER_AUTH"),
 			"account_details": await self.utils.convert_account_data(account_details),
-			"world_data": await self.utils.get_world_combination(world_data),
+			"world_data": world_data,
 			"quantity": amount,
 			"output_world": world_name.upper()
 		}
@@ -218,10 +207,14 @@ class Admin(commands.Cog):
 			async with session.post(f"http://{os.getenv('BILLGANGBOT_LUCIFER_IP')}:{os.getenv('BILLGANGBOT_LUCIFER_PORT')}/delivery", json=data) as response:
 				if response.status == 200:
 					content = await response.json()
+
+					await self.utils.update_global_stock()
+					
 					await self.utils.send_log('DELIVERY', f"{content['content']}\n\nTime: <t:{content['time']}> **[MANUAL]**")
 					await ctx.respond(embed = discord.Embed(title = "Success", description=content['content'], color = discord.Color.green()))
 					return
 				else:
+					print(await response.text())
 					content = await response.json()
 					await ctx.respond(embed = discord.Embed(title = "Unsuccessful Command", description=f"An error occured while delivering! Please check <#{config["CHANNELS"]["logs"]}>.", color = discord.Color.red()))
 					await self.utils.send_log('ERROR', f"Error code {response.status} while manually delivering stock.\n\n{content['error_code']}\n{content['error']}")
@@ -315,22 +308,9 @@ class Admin(commands.Cog):
 				if response.status == 200:
 					await message.edit(embed = discord.Embed(title = "Success", description="Successfully synced save world counts to database! Updating BillGang stock counts...", color = discord.Color.green()))
 
-					world_cursor = await self.db.execute("SELECT * FROM save_worlds")
-					world_data = await world_cursor.fetchall()
+					await self.utils.update_global_stock()
 
-					total = {
-						"1796": 0,
-						"7188": 0
-					}
-
-					for world in world_data:
-						amounts = json.loads(world[2])
-
-						for key in amounts.keys():
-							total[key] += amounts[key]
-
-					for key in total.keys():
-						await self.utils.update_billgang_stock(key, total[key], 'set')
+					await message.edit(embed = discord.Embed(title = "Success", description="Successfully updated BillGang stock counts!", color = discord.Color.green()))
 
 				else:
 					print(await response.text())
@@ -343,24 +323,30 @@ class Admin(commands.Cog):
 
 		message = await ctx.respond(embed = discord.Embed(title = "Please wait", description = "Updating all stock counts on BillGang. Please wait...", color = discord.Color.orange()))
 
-		world_cursor = await self.db.execute("SELECT * FROM save_worlds")
-		world_data = await world_cursor.fetchall()
-
-		total = {
-			"1796": 0,
-			"7188": 0
-		}
-
-		for world in world_data:
-			amounts = json.loads(world[2])
-
-			for key in amounts.keys():
-				total[key] += amounts[key]
-		
-		for key in total.keys():
-			await self.utils.update_billgang_stock(key, total[key], 'set')
+		await self.utils.update_global_stock()
 
 		await message.edit(embed = discord.Embed(title = "Success", description = "Successfully updated all stock counts on BillGang", color = discord.Color.green()))
+
+	@manage.command(name = "order", description = "Manage an order")
+	async def order(self, ctx, order_id: discord.Option(str, description = "Order ID to edit"), key: discord.Option(str, description="Value to edit", choices = ["quantity", "status"]), value: discord.Option(str, description="New value")):
+		if key == "quantity":
+			if not value.isnumeric():
+				await ctx.respond(embed = discord.Embed(title = "Unsuccessful Command", description="A 'quantity' value must be numeric!", color = discord.Color.red()))
+				return
+			else:
+				value = int(value)
+			
+		cursor = await self.db.execute("SELECT COUNT(*) FROM orders WHERE orderId = %s", [order_id])
+		results = await cursor.fetchone()
+
+		if results[0] > 0:
+			cursor = await self.db.execute("UPDATE orders SET %s = %s WHERE orderId = %s", [key, value, order_id])
+
+			await ctx.respond(embed = discord.Embed(title = "Success", description = "Successfully updated order!", color = discord.Color.green()))
+			return
+		else:
+			await ctx.respond(embed = discord.Embed(title = "Unsuccessful Command", description="Order ID does not exist!", color = discord.Color.red()))
+			return
 
 def setup(bot):
 	bot.add_cog(Admin(bot))

@@ -63,8 +63,8 @@ class Utils():
 
 	# Other
 	async def get_world_combination(self, target_amount, worlds):
+		worlds = await self.convert_world_data(worlds)
 		for world in worlds:
-			world = await self.convert_world_data(world)
 			world['total_amount'] = world['amounts']["1796"] + (100 * world['amounts']["7188"])
 			world['amount'] = 0  # Initialize the amount to be taken from each world
 	
@@ -132,7 +132,7 @@ class Utils():
 							content = await response.json()
 						except Exception as e:
 							content = await response.text()
-							
+
 						await self.send_log("ERROR", f"Error updating BillGang product stock!\n\n{content}")
 						return False
 					else:
@@ -260,6 +260,7 @@ class Utils():
 			return False
 		
 	async def convert_world_data(self, world_data):
+		print(1, world_data)
 		world_data = [
 		{
 			'name': world[0], 
@@ -281,3 +282,24 @@ class Utils():
 		}
 
 		return account_data
+	
+	async def update_global_stock(self):
+		world_cursor = await self.db.execute("SELECT * FROM save_worlds")
+		world_data = await world_cursor.fetchall()
+
+		total = {
+			"1796": 0,
+			"7188": 0
+		}
+
+		for world in world_data:
+			amounts = json.loads(world[2])
+
+			for key in amounts.keys():
+				total[key] += amounts[key]
+
+		total["7188"] = math.floor(total["1796"] / 100) + total["7188"]
+		total["1796"] = total["1796"] % 100
+
+		for key in total.keys():
+			await self.update_billgang_stock(key, total[key], 'set')

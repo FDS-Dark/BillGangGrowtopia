@@ -36,20 +36,20 @@ server:post("/delivery", function(request, response)
     local bot
 
     if account_details.type == "UBICONNECT" then
-        if not getBot(account_details.name) then
+        if not getBot(account_details.username) then
             addUbiBot(account_details.username, account_details.password, account_details.secret)
             local bots = getBots()
             bot = bots[#bots]
         else
-            bot = getBot(account_details.name)
+            bot = getBot(account_details.username)
         end
     elseif account_details.type == "LEGACY" then
-        if not getBot(account_details.name) then
+        if not getBot(account_details.username) then
             addBot(account_details.username, account_details.password)
             local bots = getBots()
             bot = bots[#bots]
         else
-            bot = getBot(account_details.name)
+            bot = getBot(account_details.username)
         end
     end
 
@@ -87,6 +87,40 @@ server:post("/delivery", function(request, response)
         return items
     end
 
+    local function count_dropped_locks_string()
+        local items = {
+            ["1796"] = 0,
+            ["7188"] = 0
+        }
+
+        for _, object in pairs(bot:getWorld():getObjects()) do
+            if object.id == 1796 then
+                items["1796"] = items["1796"] + object.count
+            elseif object.id == 7188 then
+                items["7188"] = items["7188"] + object.count
+            end
+        end
+
+        return items
+    end
+
+    local function count_locks_string()
+        local items = {
+            ["1796"] = 0,
+            ["7188"] = 0
+        }
+
+        for _, item in pairs(bot:getInventory():getItems()) do
+            if item.id == 1796 then
+                items["1796"] = items["1796"] + item.count
+            elseif item.id == 7188 then
+                items["7188"] = items["7188"] + item.count
+            end
+        end
+
+        return items
+    end
+
     local function find_tile(id)
         for _, tile in pairs(bot:getWorld():getTiles()) do
             if tile.fg == id or tile.bg == id then
@@ -104,8 +138,8 @@ server:post("/delivery", function(request, response)
     -- items is given via POST request in world_data (world_data.items)
     local function divide_locks(world, target, start_counts)
         print('target: ', target)
-        local DLS = world.items["1796"]
-        local BGLS = world.items["7188"]
+        local DLS = world.amounts["1796"]
+        local BGLS = world.amounts["7188"]
 
         local world_objects = count_dropped_locks()
 
@@ -244,9 +278,9 @@ server:post("/delivery", function(request, response)
                             DL_TILE = bot:getWorld():getTile(tile.x+x, tile.y)
 
                             if x == -1 then
-                                BGL_DIRECTION = false
+                                DL_DIRECTION = false
                             elseif x == 1 then
-                                BGL_DIRECTION = true
+                                DL_DIRECTION = true
                             end
 
                             -- bot:findPath(tile.x+x, tile.y)
@@ -275,7 +309,7 @@ server:post("/delivery", function(request, response)
             local counted_locks = count_dropped_locks()
 
             if not DL_TILE then
-                response:setContent(json.encode({error_code = "ITEM_TILE_NOT_FOUND", error = "Blue Gem Lock tile not found in "..bot:getWorld().name}), 'application/json')
+                response:setContent(json.encode({error_code = "ITEM_TILE_NOT_FOUND", error = "Diamond Lock tile not found in "..bot:getWorld().name}), 'application/json')
                 response.status = 404
                 return false
             end
@@ -348,8 +382,6 @@ server:post("/delivery", function(request, response)
                 end
             end
         end
-
-        local BGL_TILE
         
         print('target bgls: ', bot:getInventory():getItemCount(1796) ~= (target % 100) + start_counts[1796])
         while bot:getInventory():getItemCount(7188) ~= math.floor(target / 100) + start_counts[7188] do
@@ -454,9 +486,163 @@ server:post("/delivery", function(request, response)
     end
 
     function return_to_saves()
-        local items = count_locks()
+        print("RETURNING TO SAVES!")
+        local items = count_locks_string()
         
         local distributed = distribute_locks(world_data, items)
+
+        local status = false
+    
+        while not status do
+            local count = 0
+            for world_name, data in pairs(distributed) do
+    
+                local join_count = 0
+                local skip_world = false
+    
+                while bot:getWorld().name:lower() ~= world_name:lower() do
+                    if join_count >= 5 then
+                        -- response:setContent(json.encode({error_code = "DISTRIBUTE_ITEMS_WORLD_JOIN_FAILED", error = "Bot account "..account_details.username.." failed to join world "..output_world.." while distributing."}), 'application/json')
+                        -- response.status = 404
+    
+                        POST('http://73.247.130.199:3730/distribute', {error_code = "RETURN_ITEMS_WORLD_JOIN_FAILED", error = "Bot account "..account_details.username.." failed to join world "..world_name.." while returning to save world. Skipped world."})
+                        -- print('DISTRIBUTE_ITEMS_WORLD_JOIN_FAILED', "Bot account "..bot.name.." failed to join world "..world_name.." while distributing.")
+                        skip_world = true
+                        break
+                    else
+                        bot:warp(world_name, data.id)
+                        sleep(8000)
+                        join_count = join_count + 1
+                    end
+                end
+    
+                if skip_world then
+                    items = count_locks_string()
+                    new_world_data = {}
+    
+                    for _, world in pairs(world_data) do
+                        if world.name ~= world_name then
+                            table.insert(new_world_data, world)
+                        end
+                    end
+    
+                    if #new_world_data == 0 then
+                        response:setContent(json.encode({error_code = "COMPLETE_RETURN_ERROR", error = "Ran out of worlds to return items to! Bot name "..bot.name.." has logged off with dropped items. CHECK ASAP <@"..owner_id..">!"}), 'application/json')
+                        response.status = 404
+                        bot:disconnect()
+                        bot.auto_reconnect = false
+                        return
+                    end
+    
+                    world_data = new_world_data
+        
+                    distributed = distribute_locks(world_data, items)
+                    break
+                end
+    
+                for item_id, quantity in pairs(data.items) do
+                    if quantity > 0 then
+                        drop_tile = data.positions[item_id]
+                        print(drop_tile)
+                        print(#data.positions)
+    
+                        for key, value in pairs(data.positions) do
+                            print(key, type(key), value, type(value))
+                        end
+    
+                        local found = false
+    
+                        for _, tile in pairs(bot:getWorld():getTiles()) do
+                            if tile.bg == drop_tile then
+                                for x = -1, 1, 2 do
+    
+                                    if #bot:getPath(tile.x+x, tile.y) > 0 then
+                                        found = true
+                                        bot:findPath(tile.x+x, tile.y)
+                                        sleep(1000)
+                                    
+                                        if x == -1 then
+                                            bot:setDirection(false)
+                                        elseif x == 1 then
+                                            bot:setDirection(true)
+                                        end
+                                        break
+                                    end
+    
+                                end
+    
+                                if found then
+                                    break
+                                end
+                            end
+                        end
+    
+                        if not found then
+                            POST('http://73.247.130.199:3730/distribute', {error_code = "RETURN_ITEMS_DROP_POSITION_FAILED", error = "Bot account "..account_details.username.." failed to get drop position for "..getInfo(tonumber(item_id)).name.." in "..world_name.." while returning items to saves. Skipped world."})
+                            -- print('DISTRIBUTE_ITEMS_DROP_POSITION_FAILED', "Bot account "..bot.name.." failed to get drop position for "..getInfo(tonumber(item_id)).name.." in "..world_name.." while distributing.")
+                            skip_world = true
+                            sleep(5000)
+                            break
+                        end
+    
+                        local before = bot:getInventory():getItemCount(tonumber(item_id))
+                        local attempts = 0
+    
+                        while bot:getInventory():getItemCount(tonumber(item_id)) == before do
+                            if attempts >= 5 then
+                                POST('http://73.247.130.199:3730/distribute', {error_code = "RETURN_ITEMS_DROP_FAILED", error = "Bot account "..account_details.username.." failed drop "..getInfo(tonumber(item_id)).name.." in "..world_name.." while returning items to saves. Skipped world."})
+                                -- print("DISTRIBUTE_ITEMS_DROP_FAILED", "Bot account "..bot.name.." failed drop "..getInfo(tonumber(item_id)).name.." in "..world_name.." while distributing.")
+                                skip_world = true
+                                break
+                            else
+                                bot:drop(tonumber(item_id), quantity)
+                                sleep(500)
+                            end
+                        end
+                    end
+                end
+    
+                if skip_world then
+                    items = count_locks_string()
+                    new_world_data = {}
+        
+                    for _, world in pairs(world_data) do
+                        if world.name ~= world_name then
+                            table.insert(new_world_data, world)
+                        end
+                    end
+    
+                    if #new_world_data == 0 then
+                        response:setContent(json.encode({error_code = "COMPLETE_RETURN_ERROR", error = "Ran out of worlds to return items to to! Bot name "..bot.name.." has logged off with dropped items. CHECK ASAP <@"..owner_id..">!"}), 'application/json')
+                        response.status = 404
+                        bot:disconnect()
+                        bot.auto_reconnect = false
+                        return
+                    end
+        
+                    world_data = new_world_data
+        
+                    distributed = distribute_locks(world_data, items)
+                    break
+                end
+            end
+    
+            if bot:getInventory():getItemCount(1796) == 0 and bot:getInventory():getItemCount(7188) == 0 then
+                status = true
+                break
+            end
+        end
+    end
+
+    function make_bgl(telephone)
+        bot:wrench(telephone.x, telephone.y)
+        sleep(500)
+        bot:sendPacket(2, "action|dialog_return\ndialog_name|phonecall\ntilex|"..telephone.x.."|\ntiley|"..telephone.y.."|\nnum|-2|\ndial|53785")
+        sleep(500)
+        bot:sendPacket(2, "action|dialog_return\ndialog_name|phonecall\ntilex|"..telephone.x.."|\ntiley|"..telephone.y.."|\nnum|53785|\nbuttonClicked|chc5")
+        sleep(500)
+        bot:sendPacket(2, "action|dialog_return\ndialog_name|phonecall\ntilex|"..telephone.x.."|\ntiley|"..telephone.y.."|\nnum|-34|\nbuttonClicked|chc0")
+        sleep(500)
     end
 
     sleep(1500)
@@ -617,14 +803,7 @@ server:post("/delivery", function(request, response)
                 return
             end
 
-            bot:wrench(telephone.x, telephone.y)
-            sleep(500)
-            bot:sendPacket(2, "action|dialog_return\ndialog_name|phonecall\ntilex|"..telephone.x.."|\ntiley|"..telephone.y.."|\nnum|-2|\ndial|53785")
-            sleep(500)
-            bot:sendPacket(2, "action|dialog_return\ndialog_name|phonecall\ntilex|"..telephone.x.."|\ntiley|"..telephone.y.."|\nnum|53785|\nbuttonClicked|chc5")
-            sleep(500)
-            bot:sendPacket(2, "action|dialog_return\ndialog_name|phonecall\ntilex|"..telephone.x.."|\ntiley|"..telephone.y.."|\nnum|-34|\nbuttonClicked|chc0")
-            sleep(500)
+            make_bgl(telephone)
         end  
 
         -- local COLLECT_LOGS = {}
@@ -678,7 +857,7 @@ server:post("/delivery", function(request, response)
     end
 
     if bot:getInventory():getItemCount(7188) ~= amounts[7188] or bot:getInventory():getItemCount(1796) ~= amounts[1796] then
-        response:setContent(json.encode({error_code = "PICKUP_MISCOUNT", error = "Bot account "..account_details.username.." failed to collect the correct amount of items.\n\nBlue Gem Locks needed: "..amounts[7188].."\nBlue Gem Locks collected: "..bot:getInventory():getItemCount(7188).."\n\nDiamond Locks needed: "..amounts[7188].."\nDiamond Locks collected: "..bot:getInventory():getItemCount(1796).."\n\nPlease check ASAP!"}), 'application/json')
+        response:setContent(json.encode({error_code = "PICKUP_MISCOUNT", error = "Bot account "..account_details.username.." failed to collect the correct amount of items.\n\nBlue Gem Locks needed: "..amounts[7188].."\nBlue Gem Locks collected: "..bot:getInventory():getItemCount(7188).."\n\nDiamond Locks needed: "..amounts[1796].."\nDiamond Locks collected: "..bot:getInventory():getItemCount(1796).."\n\nPlease check ASAP! Items have been returned to their worlds."}), 'application/json')
         response.status = 404
         return_to_saves()
         return
@@ -736,7 +915,7 @@ server:post("/delivery", function(request, response)
         end
     end
 
-    if display_box or skip_to_display_box then
+    if (display_box and skip_to_display_box) or (not donation_box and display_box) then
         bot:findPath(display_box_coordinates.x, display_box_coordinates.y)
         sleep(1000)
         bot:setDirection(display_box_coordinates.left)
@@ -778,36 +957,9 @@ server:post("/delivery", function(request, response)
     bot:leaveWorld()
     sleep(1000)
 
-    response:setContent(json.encode({content = "Successfully distributed diamond locks to "..output_world.."!", time = os.time()}), 'application/json')
+    response:setContent(json.encode({content = "Successfully distributed "..quantity.." Diamond Locks to "..output_world.."!", time = os.time()}), 'application/json')
     response.status = 200
-    runThread(function(bot_name)
-        local function generateRandomWorld(length)
-            local characters
-            
-            if include_numbers then
-                characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            else
-                characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            end
-            
-            local randomWorld = ""
-            
-            for i = 1, length do
-                local randomIndex = math.random(1, #characters)
-                randomWorld = randomWorld .. string.sub(characters, randomIndex, randomIndex)
-            end
-            
-            return randomWorld
-        end
 
-        local bot = getBot(bot_name)
-        if bot then
-            for i = 1, 10 do
-                bot:warp(generateRandomWorld(14))
-                sleep(5000)
-            end
-        end
-    end, bot.name)
     return
 end)
 
@@ -1097,6 +1249,13 @@ server:post("/distribute2", function(request, response)
 
     local items = count_locks_string()
     local distributed = distribute_locks(world_data, items)
+    for key, value in pairs(distributed) do
+        for key2, value2 in pairs(value) do
+            print(key2, value2)
+        end
+    end
+
+
     local status = false
 
     while not status do
@@ -1183,7 +1342,7 @@ server:post("/distribute2", function(request, response)
                     end
 
                     if not found then
-                        POST('http://73.247.130.199:3730/distribute', {error_code = "DISTRIBUTE_ITEMS_WORLD_JOIN_FAILED", error = "Bot account "..account_details.username.." failed to get drop position for "..getInfo(tonumber(item_id)).name.." in "..world_name.." while distributing. Skipped world."})
+                        POST('http://73.247.130.199:3730/distribute', {error_code = "RETURN_ITEMS_DROP_POSITION_FAILED", error = "Bot account "..account_details.username.." failed to get drop position for "..getInfo(tonumber(item_id)).name.." in "..world_name.." while distributing. Skipped world."})
                         -- print('DISTRIBUTE_ITEMS_DROP_POSITION_FAILED', "Bot account "..bot.name.." failed to get drop position for "..getInfo(tonumber(item_id)).name.." in "..world_name.." while distributing.")
                         skip_world = true
                         sleep(5000)
